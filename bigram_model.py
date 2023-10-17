@@ -3,6 +3,8 @@ import torch.nn as nn
 from torch.nn import functional as F
 from sklearn.model_selection import train_test_split
 
+#TODO: read up on Bag of Words
+
 #defining some hyperparameters
 batch_size = 32
 block_size = 8
@@ -41,9 +43,22 @@ def get_batch(split):
     
     return x, y
 
-@torch.no_grad
+@torch.no_grad()
 def estimate_loss():
-    pass
+    #the function outputs the average loss over the train, test splits
+    out = {} #the output placeholder dictionary 
+    bi.eval() #setting the model to evaluation mode (a bigram model with just nn.Embedding will behave the same in both eval and train modes)
+    for split in ['train', 'test']:
+        losses = torch.zeros(eval_iters) #a placeholder tensor for split loss values
+
+        for i in range(eval_iters): 
+            X, y = get_batch(split)
+            logits, loss = bi(X, y) #not really using the logits variable
+            losses[i] = loss.item() #since loss is a tensor 
+
+        out[split] = losses.mean() #averaging the losses over the 'split' split
+    bi.train() #setting the model to trian mode again
+    return out 
 
 class BigramModel(nn.Module):
     def __init__(self, vocab_size):
@@ -96,7 +111,7 @@ for i in range(train_iters):
 
     if i % eval_interval == 0:
         losses = estimate_loss()
-        print(f'step: {i}, train_loss: {losses["train"]}, val loss: {losses["val"]}')
+        print(f'step: {i}, train_loss: {losses["train"]}, test loss: {losses["test"]}')
 
     #sampling new data
     xt, yt = get_batch('train')
@@ -108,5 +123,7 @@ for i in range(train_iters):
     loss.backward()
     #using the gradients to update the parameters
     optimizer.step()
+
+idx = torch.zeros((1,1), dtype=torch.long) #explained in the notebook 
     
-print(loss.item())
+print(decode(bi.generate(idx, max_new_tokens=300)[0].tolist()))

@@ -10,9 +10,10 @@ batch_size = 32
 block_size = 8
 train_iters = 3000
 eval_interval = 300
-lr = 0.01
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+lr = 0.01 
+device = 'cuda' if torch.cuda.is_available() else 'cpu' 
 eval_iters = 200
+n_embed = 32 #the number of embedding dimensions 
 
 oliver_twist = open('pg730.txt', 'r').read()
 
@@ -60,16 +61,41 @@ def estimate_loss():
     bi.train() #setting the model to trian mode again
     return out 
 
+#the attention head class
+class Head(nn.Module):
+    def __init__(self, head_size):
+        super().__init__()
+        self.key = nn.Linear(n_embed, head_size, bias=False) #the key tensor 
+        self.query = nn.Linear(n_embed, head_size, bias=False) #the query tensor
+        self.value = nn.Linear(n_embed, head_size, bias=False) #the value tensor
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+
+    def forward(self, x):
+        B, T, C = x.shape 
+        k = self.key(x)
+        q = self.query(x)
+        #computing affinities (attention scores)
+        wei = q @ k.transpose(-2,-1) * C**(-0.5) #(B,T,C) @ (B,C,T) -> (B,T,T), transposing the last two dims of k
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
+
+
+#the bigram model class
 class BigramModel(nn.Module):
-    def __init__(self, vocab_size):
+    def __init__(self):
         super().__init__()
         #creating a lookup table, just like in makemore #1
-        self.token_embedding_table = nn.Embedding(vocab_size, vocab_size)
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embed) #encoding the identities of tokens
+        self.position_embedding_table = nn.Embedding(block_size, n_embed) #also encoding the positons of tokens
+        self.lm_head = nn.Linear(n_embed, vocab_size) #language model head, essentially a linear layer 
         
     def forward(self, idx, targets=None):
-        #idx, targets -- (B,T) tensors of integers                                 #Time = block_size
-        logits = self.token_embedding_table(idx) # (a tensor of dimensions (Batch x Time x Channel))
+        #idx, targets -- (B,T) tensors of integers     
+        B, T = idx.shape #extracting B, T from idx
+        tok_embeddings = self.token_embedding_table(idx)
+        pos_emb = self.position_embedding_table(torch.arange(T, device=device)) #pos_emb.shape = (T,C)
+        x = tok_embeddings + pos_emb 
         #logits -- the logs of probabilities of the characters being the next ones after some other characters
+        logits = self.lm_head(x)
         
         if targets is None:
             loss = None
@@ -102,7 +128,7 @@ class BigramModel(nn.Module):
             
         return idx
     
-bi = BigramModel(vocab_size)
+bi = BigramModel()
 
 optimizer = torch.optim.Adam(bi.parameters(), lr=lr)
 

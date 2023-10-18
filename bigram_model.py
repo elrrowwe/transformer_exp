@@ -5,12 +5,14 @@ from sklearn.model_selection import train_test_split
 
 #TODO: read up on Bag of Words
 
+#temporarily added THE HAUNTED MAN AND THE GHOST’S BARGAIN to the training data set 
+
 #defining some hyperparameters
 batch_size = 32
 block_size = 8
-train_iters = 3000
-eval_interval = 300
-lr = 0.01 
+train_iters = 5000
+eval_interval = 500
+lr = 0.001 
 device = 'cuda' if torch.cuda.is_available() else 'cpu' 
 eval_iters = 200
 n_embed = 32 #the number of embedding dimensions 
@@ -77,6 +79,11 @@ class Head(nn.Module):
         #computing affinities (attention scores)
         wei = q @ k.transpose(-2,-1) * C**(-0.5) #(B,T,C) @ (B,C,T) -> (B,T,T), transposing the last two dims of k
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
+        wei = F.softmax(wei, dim=1) #(B,T,T)
+        v = self.value(x) #(B,T,C)
+        out = wei @ v #(B,T,T) @ (B,T,C) -> (B,T,C)
+
+        return out 
 
 
 #the bigram model class
@@ -87,13 +94,15 @@ class BigramModel(nn.Module):
         self.token_embedding_table = nn.Embedding(vocab_size, n_embed) #encoding the identities of tokens
         self.position_embedding_table = nn.Embedding(block_size, n_embed) #also encoding the positons of tokens
         self.lm_head = nn.Linear(n_embed, vocab_size) #language model head, essentially a linear layer 
-        
+        self.sa_head = Head(n_embed) #a self-attention head
+
     def forward(self, idx, targets=None):
         #idx, targets -- (B,T) tensors of integers     
         B, T = idx.shape #extracting B, T from idx
         tok_embeddings = self.token_embedding_table(idx)
         pos_emb = self.position_embedding_table(torch.arange(T, device=device)) #pos_emb.shape = (T,C)
-        x = tok_embeddings + pos_emb 
+        x = tok_embeddings + pos_emb #word embeddings + positional encoding for the whole input sequence
+        x = self.sa_head(x)
         #logits -- the logs of probabilities of the characters being the next ones after some other characters
         logits = self.lm_head(x)
         
@@ -116,7 +125,8 @@ class BigramModel(nn.Module):
         #idx - a (B, T) array of indices in the current context
         for _ in range(max_new_tokens):
             #getting the predictions 
-            logits, loss = self(idx)
+            idx_cond = idx[:, -block_size:]
+            logits, loss = self(idx_cond)
             #focus only on the last time step (pluck out the last value in the Time dimension, pytorch notation)
             logits = logits[:, -1, :] #transforms into (B, C)
             #apply the softmaax activation to probabilities

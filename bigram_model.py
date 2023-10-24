@@ -67,18 +67,18 @@ def estimate_loss():
 class Head(nn.Module):
     def __init__(self, head_size):
         super().__init__()
-        self.key = nn.Linear(n_embed, head_size, bias=False) #the key tensor 
-        self.query = nn.Linear(n_embed, head_size, bias=False) #the query tensor
-        self.value = nn.Linear(n_embed, head_size, bias=False) #the value tensor
-        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+        self.key = nn.Linear(n_embed, head_size, bias=False) #the key tensor; 'what I have'
+        self.query = nn.Linear(n_embed, head_size, bias=False) #the query tensor; 'what I want/am interested in'
+        self.value = nn.Linear(n_embed, head_size, bias=False) #the value tensor 'what I get/what I give if I have what you want and you find me interesting'
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size))) 
 
     def forward(self, x):
         B, T, C = x.shape 
         k = self.key(x)
         q = self.query(x)
         #computing affinities (attention scores)
-        wei = q @ k.transpose(-2,-1) * C**(-0.5) #(B,T,C) @ (B,C,T) -> (B,T,T), transposing the last two dims of k
-        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
+        wei = q @ k.transpose(-2,-1) * C**(-0.5) #(B,T,C) @ (B,C,T) -> (B,T,T), transposing the last two dims of k; these are attention scores = soft (not const) weights
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) #with this line our attention is essentially a decoder-only attention, remove this line to get an encoder structure (past tokens can communicate with future ones and vice versa)
         wei = F.softmax(wei, dim=1) #(B,T,T)
         v = self.value(x) #(B,T,C)
         out = wei @ v #(B,T,T) @ (B,T,C) -> (B,T,C)

@@ -3,227 +3,198 @@ import torch.nn as nn
 from torch.nn import functional as F
 from sklearn.model_selection import train_test_split
 
-#TODO: read up on Bag of Words
-#TODO: explain dropout (paper)
-#TODO: explain projection 
+# TODO: read up on Bag of Words
+# TODO: explain dropout (paper)
+# TODO: explain projection
 
-#temporarily added THE HAUNTED MAN AND THE GHOST’S BARGAIN to the oliver_twist data set 
+# temporarily added THE HAUNTED MAN AND THE GHOST’S BARGAIN to the oliver_twist data set
 
-#defining some hyperparameters
-batch_size = 32 #how many sequences (sentences of some length) are processed at once
-block_size = 8 #how long the aforementioned sequences are (context length)
+# defining some hyperparameters
+batch_size = 64  # how many sequences (sentences of some length) are processed at once
+block_size = 256  # how long the aforementioned sequences are (context length)
 train_iters = 5000
 eval_interval = 500
-lr = 0.001 
-device = 'cuda' if torch.cuda.is_available() else 'cpu' 
-eval_iters = 200 
-n_embed = 32 #the number of embedding dimensions (the dimensionality of embedding vectors)
+lr = 0.001
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+print(device)
+eval_iters = 200
+n_embed = 384  # the number of embedding dimensions (the dimensionality of embedding vectors)
+n_head = 6  # the number of heads in the multi-head attention layer
+n_layer = 6
+dropout = 0.17  # the dropout rate
 
 # oliver_twist = open('pg730.txt', 'r', encoding='utf8').read()
-shakespeare = open('tiny_shakespeare.txt', 'r', encoding='utf8').read()
+shakespeare = open('/kaggle/input/tiny-shakespeare/tiny_shakespeare.txt', 'r', encoding='utf8').read()
 
-#getting all the characters, like in the n-gram model 
+# getting all the characters, like in the n-gram model
 chars = sorted(list(set(shakespeare)))
 vocab_size = len(chars)
 
-#a simple (de-)tokenizer
-stoi = {s:i for i,s in enumerate(chars)}
-itos = {i:s for s,i in stoi.items()}
+# a simple (de-)tokenizer
+stoi = {s: i for i, s in enumerate(chars)}
+itos = {i: s for s, i in stoi.items()}
 
-encode = lambda s: [stoi[ch] for ch in s] #tokenize some characters
-decode = lambda i: ' '.join([itos[num] for num in i]) #detokenize some integers
+encode = lambda s: [stoi[ch] for ch in s]  # tokenize some characters
+decode = lambda i: ' '.join([itos[num] for num in i])  # detokenize some integers
 
-#tokenizing the entire data set
-enc = torch.tensor(encode(shakespeare), dtype=torch.long)
+# tokenizing the entire data set
+enc = torch.tensor(encode(shakespeare), dtype=torch.long, device=device)
 
-#splitting the text into train, test portions
-train, test = train_test_split(enc, test_size = 0.3)
+# splitting the text into train, test portions
+train, test = train_test_split(enc, test_size=0.3)
 
 
-#a function which returns the 4 random sequences of context length 8
 def get_batch(split):
     data = train if split == 'train' else test
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([data[i:i+block_size] for i in ix]) #stacking the 1D tensors as rows into a matrix
-    y = torch.stack([data[i+1:i+block_size+1] for i in ix]) #same thing for ys
-    
+    ix = torch.randint(len(data) - block_size, (batch_size,), device=device)
+    x = torch.stack([data[i:i + block_size] for i in ix])
+    y = torch.stack([data[i + 1:i + block_size + 1] for i in ix])
+
     return x, y
+
 
 @torch.no_grad()
 def estimate_loss():
-    #the function outputs the average loss over the train, test splits
-    out = {} #the output placeholder dictionary 
-    bi.eval() #setting the model to evaluation mode (a bigram model with just nn.Embedding will behave the same in both eval and train modes)
+    out = {}  # the output placeholder dictionary
+    bi.eval()
     for split in ['train', 'test']:
-        losses = torch.zeros(eval_iters) #a placeholder tensor for split loss values
+        losses = torch.zeros(eval_iters, device=device)
 
-        for i in range(eval_iters): 
+        for i in range(eval_iters):
             X, y = get_batch(split)
-            logits, loss = bi(X, y) #not really using the logits variable
-            losses[i] = loss.item() #since loss is a tensor 
+            logits, loss = bi(X, y)
+            losses[i] = loss.item()
 
-        out[split] = losses.mean() #averaging the losses over the 'split' split
-    bi.train() #setting the model to trian mode again
-    return out 
+        out[split] = losses.mean()
+    bi.train()
+    return out
 
-#the attention head class
+
 class Head(nn.Module):
     def __init__(self, head_size):
         super().__init__()
-        self.key = nn.Linear(n_embed, head_size, bias=False) #the key tensor; 'what I have'
-        self.query = nn.Linear(n_embed, head_size, bias=False) #the query tensor; 'what I want/am interested in'
-        self.value = nn.Linear(n_embed, head_size, bias=False) #the value tensor 'what I get/what I give if I have what you want and you find me interesting'
-        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size))) 
+        self.key = nn.Linear(n_embed, head_size, bias=False).to(device)
+        self.query = nn.Linear(n_embed, head_size, bias=False).to(device)
+        self.value = nn.Linear(n_embed, head_size, bias=False).to(device)
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)).to(device))
 
     def forward(self, x):
-        B, T, C = x.shape 
+        B, T, C = x.shape
         k = self.key(x)
         q = self.query(x)
-        """
-        the key tensor is used to compute the similarity between each position in the input sequence and every other position,
-        the query tensor is used to compute the most relevant positions in the sequence to the current position (which positions the current one is most interested in), 
-        the value tensor is used to compute the weighted sum of the values at the relevant positions (ultimately aggregate from the most relevant positions to the current one)
-        """
-        #computing affinities (attention scores)
-        wei = q @ k.transpose(-2,-1) * C**(-0.5) #(B,T,C) @ (B,C,T) -> (B,T,T), transposing the last two dims of k; these are attention scores = soft (not const) weights
-        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) #with this line our attention is essentially a decoder-only attention, remove this line to get an encoder structure (past tokens can communicate with future ones and vice versa)
-        wei = F.softmax(wei, dim=1) #(B,T,T)
-        v = self.value(x) #(B,T,C)
-        out = wei @ v #(B,T,T) @ (B,T,C) -> (B,T,C)
+        wei = q @ k.transpose(-2, -1) * C**(-0.5)
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
+        wei = F.softmax(wei, dim=1)
+        v = self.value(x)
+        out = wei @ v
 
-        return out 
-    
+        return out
+
+
 class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, head_size):
         super().__init__()
         self.heads = nn.ModuleList(Head(head_size) for _ in range(num_heads))
-        self.proj = nn.Linear(n_embed, n_embed)
-        self.dropout = nn.Dropout(0.1)
+        self.proj = nn.Linear(n_embed, n_embed).to(device)
+        self.dropout = nn.Dropout(dropout).to(device)
 
     def forward(self, x):
         out = torch.cat([head(x) for head in self.heads], dim=-1)
         out = self.proj(out)
-        return out 
-    
+        return out
+
+
 class Dense(nn.Module):
-    """
-    a simple one(two if you count the ReLU) layer MLP, the feedforward block of the transformer
-    """
     def __init__(self, n_embed):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_embed, 4 * n_embed),
-            nn.ReLU(),
-            nn.Linear(4 * n_embed, n_embed), #projection pathway 
-            nn.Dropout(0.1)
+            nn.Linear(n_embed, 4 * n_embed).to(device),
+            nn.ReLU().to(device),
+            nn.Linear(4 * n_embed, n_embed).to(device),
+            nn.Dropout(dropout).to(device)
         )
+
     def forward(self, x):
         return self.net(x)
-    
+
+
 class Block(nn.Module):
     def __init__(self, n_embed, n_head):
         super().__init__()
         head_size = n_embed // n_head
         self.sa = MultiHeadAttention(n_head, head_size)
         self.ffn = Dense(n_embed)
-        self.ln1 = nn.LayerNorm(n_embed) 
-        self.ln2 = nn.LayerNorm(n_embed)  
-        """
-        layernorm normalizes the input to each layer to have mean 0 and variance 1,
-        thus reducing the internal covariate shift (reducing the change of distribution of the inputs to each layer during training).
-        this also has a normalization effect. by normalizing the inputs to each layer, layernorm helps stabilize the training process, improve model performance. 
-        """
+        self.ln1 = nn.LayerNorm(n_embed).to(device)
+        self.ln2 = nn.LayerNorm(n_embed).to(device)
+
     def forward(self, x):
-        x = x + self.sa(self.ln1(x)) #x + ... -- residual connection
-        x = x + self.ffn(self.ln2(x)) 
-        
+        x = x + self.sa(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+
         return x
 
 
-#the bigram model class
 class BigramModel(nn.Module):
     def __init__(self):
         super().__init__()
-        #creating a lookup table, just like in makemore #1
-        self.token_embedding_table = nn.Embedding(vocab_size, n_embed) #encoding the identities of tokens
-        self.position_embedding_table = nn.Embedding(block_size, n_embed) #also encoding the positons of tokens
-        self.lm_head = nn.Linear(n_embed, vocab_size) #language model head, essentially a linear layer 
-        # self.sa_head = Head(n_embed) #a self-attention head        #n_embed/8, since we have 8 heads and need to stack them 
-        self.sa_heads = MultiHeadAttention(num_heads=8, head_size=int(n_embed/8)) #a multi-head attention layer
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embed).to(device)
+        self.position_embedding_table = nn.Embedding(block_size, n_embed).to(device)
+        self.lm_head = nn.Linear(n_embed, vocab_size).to(device)
+        self.sa_heads = MultiHeadAttention(num_heads=n_head, head_size=int(n_embed/n_head)).to(device)
         self.blocks = nn.Sequential(
-            Block(n_embed, n_head=8),
-            Block(n_embed, n_head=4),
-            Block(n_embed, n_head=8))
-        
-        self.ffn = Dense(n_embed) #a feedforward block
-        self.ln_f = nn.LayerNorm(n_embed) #layernorm
+            Block(n_embed, n_head=n_head).to(device),
+            Block(n_embed, n_head=n_head).to(device),
+            Block(n_embed, n_head=n_head).to(device))
+        self.ffn = Dense(n_embed).to(device)
+        self.ln_f = nn.LayerNorm(n_embed).to(device)
 
     def forward(self, idx, targets=None):
-        #idx, targets -- (B,T) tensors of integers     
-        B, T = idx.shape #extracting B, T from idx
+        B, T = idx.shape
         tok_embeddings = self.token_embedding_table(idx)
-        pos_emb = self.position_embedding_table(torch.arange(T, device=device)) #pos_emb.shape = (T,C)
-        x = tok_embeddings + pos_emb #word embeddings + positional encoding for the whole input sequence
-        # x = self.sa_head(x)
-        #logits -- the logs of probabilities of the characters being the next ones after some other characters
+        pos_emb = self.position_embedding_table(torch.arange(T, device=device))
+        x = tok_embeddings + pos_emb
         x = self.sa_heads(x)
         logits = self.lm_head(x)
         x = self.blocks(x)
-        
+
         if targets is None:
             loss = None
         else:
-        
-            #reshaping the tensor becaus of torch specifics 
             B, T, C = logits.shape
             logits = logits.view(B*T, C)
-
             targets = targets.view(B*T)
-
-            #cross entropy = negative log likelihood
             loss = F.cross_entropy(logits, targets)
 
         return logits, loss
-                      #idx - the current context of some characters in the current batch 
+
     def generate(self, idx, max_new_tokens):
-        #idx - a (B, T) array of indices in the current context
         for _ in range(max_new_tokens):
-            #getting the predictions 
             idx_cond = idx[:, -block_size:]
             logits, loss = self(idx_cond)
-            #focus only on the last time step (pluck out the last value in the Time dimension, pytorch notation)
-            logits = logits[:, -1, :] #transforms into (B, C)
-            #apply the softmaax activation to probabilities
-            probs = F.softmax(logits, dim=-1) #(B,C)
-            #sample from the distribution
-            idx_next = torch.multinomial(probs, num_samples=1) #(B,1)
-            #append the sampled index to the running sequence
-            idx = torch.cat((idx, idx_next), dim=1) #(B, T+1)#
-            
+            logits = logits[:, -1, :]
+            probs = F.softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1)
+            idx = torch.cat((idx, idx_next), dim=1)
+
         return idx
-    
-bi = BigramModel()
+
+
+bi = BigramModel().to(device)
 
 optimizer = torch.optim.Adam(bi.parameters(), lr=lr)
 
-#training the model
 for i in range(train_iters):
 
     if i % eval_interval == 0:
         losses = estimate_loss()
         print(f'step: {i}, train_loss: {losses["train"]}, test loss: {losses["test"]}')
 
-    #sampling new data
     xt, yt = get_batch('train')
-    #calculating the loss
     logits, loss = bi(xt, yt)
-    #zeroing all the gradients from the previous step
     optimizer.zero_grad(set_to_none=True)
-    #getting the gradients of all the parameters
     loss.backward()
-    #using the gradients to update the parameters
     optimizer.step()
 
-idx = torch.zeros((1,1), dtype=torch.long) #explained in the notebook 
-    
+idx = torch.zeros((1, 1), dtype=torch.long, device=device)
+
 print(decode(bi.generate(idx, max_new_tokens=300)[0].tolist()))

@@ -5,7 +5,6 @@ from sklearn.model_selection import train_test_split
 
 # TODO: read up on Bag of Words
 # TODO: explain dropout (paper)
-# TODO: explain projection
 
 # temporarily added THE HAUNTED MAN AND THE GHOST’S BARGAIN to the oliver_twist data set
 
@@ -98,12 +97,14 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, head_size):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        # the projection matrix is necessary to take the [num_heads, n_embed] attention output back to [n_embed]
+        # such a need arises because of the residual connection between x and the attention output (without the projection they'd be of different shapes)
         self.proj = nn.Linear(n_embed, n_embed).to(device)
         self.dropout = nn.Dropout(dropout).to(device)
 
     def forward(self, x):
         out = torch.cat([head(x) for head in self.heads], dim=-1)
-        out = self.dropout(self.proj(out))
+        out = self.dropout(self.proj(out)) 
         
         return out
 
